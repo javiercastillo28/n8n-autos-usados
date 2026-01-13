@@ -1,0 +1,139 @@
+{
+  "name": "Bot Usaditos - Simple",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "bot-usaditos-simple",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "id": "webhook-main",
+      "name": "Webhook Chatwoot",
+      "webhookId": "bot-usaditos-simple"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// EXTRAER DATOS DEL MENSAJE DE CHATWOOT\n// ============================================\nconst body = items[0].json.body || items[0].json;\n\n// Solo procesar eventos de mensaje creado\nif (body.event !== 'automation_event.message_created') {\n  console.log('❌ Evento ignorado:', body.event);\n  return [];\n}\n\nconst message = body.messages?.[0] || {};\n\n// Solo procesar mensajes entrantes de contactos\nif (message.message_type !== 0 || message.sender_type !== 'Contact') {\n  console.log('❌ Mensaje no es de contacto:', message.sender_type);\n  return [];\n}\n\nconst sender = message.sender || {};\nconst phoneNumber = (sender.phone_number || '').replace('+', '');\nconst conversationId = body.id;\nconst messageContent = (message.content || '').trim();\n\nconsole.log(`📩 Mensaje recibido de ${phoneNumber}: \"${messageContent}\"`);\n\nreturn [{\n  json: {\n    conversationId,\n    phoneNumber,\n    contactName: sender.name || 'Cliente',\n    message: messageContent\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "id": "extraer-datos",
+      "name": "Extraer Datos"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// LÓGICA PRINCIPAL DEL BOT (MÁQUINA DE ESTADOS + COMANDOS)\n// ============================================\nconst staticData = $getWorkflowStaticData('global');\nif (!staticData.sessions) staticData.sessions = {};\n\nconst data = items[0].json;\nconst { phoneNumber, conversationId, message, contactName } = data;\nconst now = Date.now();\nconst msgLower = message.toLowerCase().trim();\n\n// CONSTANTES DE TIEMPO\nconst SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;\n\n// ============================================\n// COMANDOS ESPECIALES\n// ============================================\nconst COMMANDS = {\n  stop: ['stop', 'alto', 'detener', 'cancelar', 'salir'],\n  restart: ['reiniciar', 'reinicio', 'restart', 'comenzar', 'reset'],\n  help: ['/help', '/ayuda', '/comandos'],\n  stats: ['/stats', '/estadisticas'],\n  sesion: ['/sesion', '/debug']\n};\n\nlet responseMessage = '';\nlet isCommand = false;\n\n// Detectar STOP\nif (COMMANDS.stop.includes(msgLower)) {\n  isCommand = true;\n  staticData.sessions[phoneNumber] = {\n    state: 'BLOCKED',\n    blockedUntil: now + (30 * 24 * 60 * 60 * 1000),\n    conversationId\n  };\n  responseMessage = `✅ Bot pausado.\\n\\nUn miembro de nuestro equipo se ha unido para ayudarte.\\n\\nEscribe \"restart\" cuando quieras reactivar el bot.`;\n}\n\n// Detectar RESTART\nelse if (COMMANDS.restart.includes(msgLower)) {\n  isCommand = true;\n  delete staticData.sessions[phoneNumber];\n  responseMessage = `🔄 *Bot reiniciado*\\n\\nEmpecemos de nuevo.\\n\\nEscribe cualquier mensaje para comenzar.`;\n}\n\n// Detectar HELP\nelse if (COMMANDS.help.includes(msgLower)) {\n  isCommand = true;\n  responseMessage = `📋 *Comandos Disponibles*\\n\\n*🎯 Control del Bot:*\\n• \\`stop\\` - Pausar bot por 30 días\\n• \\`restart\\` - Reiniciar sesión\\n\\n*📊 Información:*\\n• \\`/sesion\\` - Ver estado de tu sesión\\n• \\`/stats\\` - Estadísticas del bot\\n\\n*💡 Ayuda:*\\n• \\`/help\\` - Ver esta ayuda`;\n}\n\n// Detectar STATS\nelse if (COMMANDS.stats.includes(msgLower)) {\n  isCommand = true;\n  const sessions = staticData.sessions || {};\n  const total = Object.keys(sessions).length;\n  const waiting = Object.values(sessions).filter(s => s.state === 'WAITING_NAME').length;\n  const completed = Object.values(sessions).filter(s => s.state === 'COMPLETED').length;\n  const blocked = Object.values(sessions).filter(s => s.state === 'BLOCKED').length;\n  responseMessage = `📊 *Estadísticas del Bot*\\n\\n• Total sesiones: ${total}\\n• Esperando nombre: ${waiting} 🟡\\n• Completados: ${completed} 🟢\\n• Bloqueados: ${blocked} 🔴`;\n}\n\n// Detectar SESION\nelse if (COMMANDS.sesion.includes(msgLower)) {\n  isCommand = true;\n  const session = staticData.sessions[phoneNumber];\n  if (session) {\n    const mins = ((now - session.lastMessageTime) / 60000).toFixed(1);\n    const daysSinceComplete = session.completedAt ? ((now - session.completedAt) / (1000 * 60 * 60 * 24)).toFixed(1) : 'N/A';\n    responseMessage = `🔍 *Tu Sesión*\\n\\n• Estado: ${session.state}\\n• Nombre: ${session.userName || 'No registrado'}\\n• Última actividad: hace ${mins} min\\n• Días desde completado: ${daysSinceComplete}\\n• Recordatorio 1: ${session.reminder1Sent ? '✅' : '⏳'}\\n• Recordatorio 2: ${session.reminder2Sent ? '✅' : '⏳'}`;\n  } else {\n    responseMessage = `🔍 *Tu Sesión*\\n\\nNo tienes una sesión activa. Escribe \"hola\" para comenzar.`;\n  }\n}\n\nif (isCommand) {\n  console.log(`🎮 Comando detectado: ${msgLower}`);\n  return [{ json: { conversationId, phoneNumber, responseMessage } }];\n}\n\n// ============================================\n// MÁQUINA DE ESTADOS\n// ============================================\nlet session = staticData.sessions[phoneNumber] || {\n  state: 'NEW',\n  conversationId,\n  lastMessageTime: now,\n  reminder1Sent: false,\n  reminder2Sent: false,\n  userName: '',\n  completedAt: null\n};\n\n// Verificar si está bloqueado\nif (session.state === 'BLOCKED' && session.blockedUntil > now) {\n  const daysLeft = ((session.blockedUntil - now) / (1000 * 60 * 60 * 24)).toFixed(0);\n  console.log(`🛑 Usuario bloqueado por ${daysLeft} días más`);\n  return [];\n}\n\nsession.conversationId = conversationId;\nsession.lastMessageTime = now;\n\nlet newState = session.state;\n\nconsole.log(`📊 Estado actual de ${phoneNumber}: ${session.state}`);\n\nswitch (session.state) {\n  case 'NEW':\n  case 'BLOCKED':\n    responseMessage = `¡Bienvenido a Pacífico Préstamos! 🚗\\n\\nEstoy aquí para ayudarte a encontrar el auto usado ideal para ti.\\n\\n¿Cuál es tu nombre?`;\n    newState = 'WAITING_NAME';\n    session.reminder1Sent = false;\n    session.reminder2Sent = false;\n    session.completedAt = null;\n    break;\n    \n  case 'WAITING_NAME':\n    session.userName = message;\n    session.completedAt = now;  // Guardar cuando completó\n    responseMessage = `¡Mucho gusto, ${message}! 😊\\n\\nAquí tienes nuestro catálogo de autos usados disponibles:\\n\\n👉 https://www.canva.com/design/DAG1fj0Sz_E/ZtO_NhZEkGGxL76dFDo3_A/view\\n\\n📞 Horario de atención:\\nLunes a Viernes: 8:00am - 5:00pm\\nSábados: 8:00am - 12:00pm\\n\\n¡Una asesora se comunicará contigo pronto!`;\n    newState = 'COMPLETED';\n    break;\n    \n  case 'COMPLETED':\n    // VENTANA DE 7 DÍAS: No responder automáticamente si completó hace menos de 7 días\n    const timeSinceCompleted = now - (session.completedAt || session.lastMessageTime);\n    if (timeSinceCompleted > SEVEN_DAYS_MS) {\n      // Han pasado más de 7 días → Responder con re-engagement\n      responseMessage = `¡Hola de nuevo${session.userName ? ', ' + session.userName : ''}! 👋\\n\\nGracias por escribirnos. Una asesora te contactará pronto.\\n\\n📋 Catálogo: https://www.canva.com/design/DAG1fj0Sz_E/ZtO_NhZEkGGxL76dFDo3_A/view`;\n      session.completedAt = now;  // Actualizar timestamp\n    } else {\n      // Menos de 7 días → NO responder automáticamente\n      const daysRemaining = ((SEVEN_DAYS_MS - timeSinceCompleted) / (1000 * 60 * 60 * 24)).toFixed(1);\n      console.log(`⏸️ Usuario completado hace menos de 7 días. Faltan ${daysRemaining} días para reactivar.`);\n      staticData.sessions[phoneNumber] = session;\n      return [];\n    }\n    break;\n    \n  default:\n    responseMessage = `¡Hola! 👋 Escribe \"hola\" para comenzar.`;\n    newState = 'NEW';\n}\n\nsession.state = newState;\nstaticData.sessions[phoneNumber] = session;\n\nconsole.log(`✅ Nuevo estado: ${newState}`);\n\nreturn [{ json: { conversationId, phoneNumber, responseMessage, session } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "id": "logica-bot",
+      "name": "Lógica Bot"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://chat.fpacifico.com/api/v1/accounts/1/conversations/{{ $json.conversationId }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "api_access_token", "value": "AkYscLu63MCfKRsdC7em8ivC" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.responseMessage, message_type: 'outgoing', private: false }) }}",
+        "options": { "response": { "response": { "neverError": true } } }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [660, 0],
+      "id": "enviar-respuesta",
+      "name": "Enviar Respuesta"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutes": 1 }]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300],
+      "id": "cron-trigger",
+      "name": "Cada 1 Minuto"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// VERIFICAR SESIONES Y ENVIAR RECORDATORIOS\n// Modo Prueba: 2 minutos y 5 minutos\n// ============================================\nconst staticData = $getWorkflowStaticData('global');\nconst sessions = staticData.sessions || {};\nconst now = Date.now();\n\n// Tiempos en milisegundos (MODO PRUEBA)\nconst REMINDER_1_TIME = 2 * 60 * 1000;  // 2 minutos\nconst REMINDER_2_TIME = 5 * 60 * 1000;  // 5 minutos\n\nconst remindersToSend = [];\n\nconsole.log('\\n' + '='.repeat(60));\nconsole.log('🔍 SISTEMA DE RECORDATORIOS');\nconsole.log('='.repeat(60));\nconsole.log(`⏰ Hora: ${new Date().toLocaleString('es-PA')}`);\nconsole.log(`📊 Total sesiones: ${Object.keys(sessions).length}`);\n\nfor (const [phoneNumber, session] of Object.entries(sessions)) {\n  // Solo procesar usuarios en estado WAITING_NAME\n  if (session.state !== 'WAITING_NAME') {\n    continue;\n  }\n  \n  const timeSinceLastMessage = now - session.lastMessageTime;\n  const minutesSince = (timeSinceLastMessage / 60000).toFixed(1);\n  \n  console.log(`\\n📱 ${phoneNumber}: ${minutesSince} min sin responder`);\n  \n  // RECORDATORIO 1: Después de 2 minutos\n  if (!session.reminder1Sent && timeSinceLastMessage >= REMINDER_1_TIME && timeSinceLastMessage < REMINDER_2_TIME) {\n    console.log(`   🔔 ENVIANDO RECORDATORIO 1`);\n    // ⚠️ MARCAR INMEDIATAMENTE para evitar duplicados\n    session.reminder1Sent = true;\n    session.reminder1Time = now;\n    staticData.sessions[phoneNumber] = session;\n    \n    remindersToSend.push({\n      phoneNumber,\n      conversationId: session.conversationId,\n      reminderType: '1',\n      message: `¿Sigues ahí? Tenemos autos usados disponibles con precios especiales.`\n    });\n  }\n  \n  // RECORDATORIO 2: Después de 5 minutos (FINAL)\n  else if (!session.reminder2Sent && timeSinceLastMessage >= REMINDER_2_TIME) {\n    console.log(`   🔔 ENVIANDO RECORDATORIO 2 (FINAL)`);\n    // ⚠️ MARCAR INMEDIATAMENTE para evitar duplicados\n    session.reminder2Sent = true;\n    session.reminder2Time = now;\n    session.state = 'COMPLETED';\n    session.completedAt = now;\n    staticData.sessions[phoneNumber] = session;\n    \n    remindersToSend.push({\n      phoneNumber,\n      conversationId: session.conversationId,\n      reminderType: '2',\n      message: `Hola 👋\\nComprendo que en este momento no puedas seguir.\\nTe dejo nuestro catálogo web de autos usados para que lo veas con tranquilidad 😊🚗\\n\\n👉 Ver autos disponibles: https://www.canva.com/design/DAG1fj0Sz_E/ZtO_NhZEkGGxL76dFDo3_A/view`\n    });\n  }\n}\n\nconsole.log(`\\n📋 Recordatorios a enviar: ${remindersToSend.length}`);\nconsole.log('='.repeat(60) + '\\n');\n\nif (remindersToSend.length === 0) {\n  return [];\n}\n\nreturn remindersToSend.map(r => ({ json: r }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300],
+      "id": "verificar-sesiones",
+      "name": "Verificar Sesiones"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://chat.fpacifico.com/api/v1/accounts/1/conversations/{{ $json.conversationId }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "api_access_token", "value": "AkYscLu63MCfKRsdC7em8ivC" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.message, message_type: 'outgoing', private: false }) }}",
+        "options": { "response": { "response": { "neverError": true } } }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [440, 300],
+      "id": "enviar-recordatorio",
+      "name": "Enviar Recordatorio"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// MARCAR RECORDATORIO COMO ENVIADO\n// ============================================\nconst staticData = $getWorkflowStaticData('global');\nconst data = items[0].json;\nconst { phoneNumber, reminderType } = data;\n\nif (staticData.sessions && staticData.sessions[phoneNumber]) {\n  const session = staticData.sessions[phoneNumber];\n  \n  if (reminderType === '1') {\n    session.reminder1Sent = true;\n    session.reminder1Time = Date.now();\n    console.log(`✅ Recordatorio 1 marcado como enviado para ${phoneNumber}`);\n  } else if (reminderType === '2') {\n    session.reminder2Sent = true;\n    session.reminder2Time = Date.now();\n    // IMPORTANTE: Marcar como completado e iniciar ventana de 7 días\n    session.state = 'COMPLETED';\n    session.completedAt = Date.now();\n    console.log(`✅ Recordatorio 2 enviado. Estado: COMPLETED. Ventana 7 días iniciada para ${phoneNumber}`);\n  }\n  \n  staticData.sessions[phoneNumber] = session;\n}\n\nreturn [{ json: { success: true, ...data } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300],
+      "id": "actualizar-sesion",
+      "name": "Marcar Enviado"
+    }
+  ],
+  "connections": {
+    "Webhook Chatwoot": {
+      "main": [[{ "node": "Extraer Datos", "type": "main", "index": 0 }]]
+    },
+    "Extraer Datos": {
+      "main": [[{ "node": "Lógica Bot", "type": "main", "index": 0 }]]
+    },
+    "Lógica Bot": {
+      "main": [[{ "node": "Enviar Respuesta", "type": "main", "index": 0 }]]
+    },
+    "Cada 1 Minuto": {
+      "main": [[{ "node": "Verificar Sesiones", "type": "main", "index": 0 }]]
+    },
+    "Verificar Sesiones": {
+      "main": [[{ "node": "Enviar Recordatorio", "type": "main", "index": 0 }]]
+    },
+    "Enviar Recordatorio": {
+      "main": [[{ "node": "Marcar Enviado", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "bot-usaditos-simple" },
+  "id": "bot-usaditos-simple",
+  "tags": []
+}
